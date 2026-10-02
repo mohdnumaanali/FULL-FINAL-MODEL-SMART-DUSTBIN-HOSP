@@ -5,10 +5,10 @@ import numpy as np
 
 app = FastAPI(title="Pragathi Smart Biomedical Waste API")
 
-# Load your newly trained model
+# Load trained YOLO model
 model = YOLO("best (2).pt")
 
-# Map exact dataset class names to official biomedical bin colors
+# STRICT MAPPING: Exact dataset folder names mapped to bin colors
 BIN_MAPPING = {
     "1-infusion blue": "BLUE",
     "2-tubes blue": "BLUE",
@@ -22,7 +22,8 @@ BIN_MAPPING = {
     "10-blister_strip yellow": "YELLOW"
 }
 
-CONFIDENCE_THRESHOLD = 0.40
+# Require a high confidence score before accepting a classification
+CONFIDENCE_THRESHOLD = 0.82
 
 @app.get("/")
 def home():
@@ -37,21 +38,26 @@ async def predict(file: UploadFile = File(...)):
     if img is None:
         return {"error": "Invalid image payload."}
 
+    # Run inference
     results = model(img, verbose=False)[0]
     top1_index = results.probs.top1
     detected_class = results.names[top1_index].lower().strip()
     confidence = float(results.probs.top1conf.item())
 
+    # Check if the detected class is explicitly in our medical dataset AND meets confidence
     if confidence >= CONFIDENCE_THRESHOLD and detected_class in BIN_MAPPING:
         target_bin = BIN_MAPPING[detected_class]
-        is_medical = target_bin in ["YELLOW", "RED", "WHITE", "BLUE"]
+        is_medical = True
+        display_item = detected_class
     else:
-        target_bin = "GENERAL / UNKNOWN"
+        # Reject background, face, or unlisted random items
+        target_bin = "NO MEDICAL WASTE DETECTED"
         is_medical = False
+        display_item = "No valid medical item"
 
     return {
         "is_medical_waste": is_medical,
-        "detected_item": detected_class,
+        "detected_item": display_item,
         "confidence_percentage": round(confidence * 100, 2),
         "target_bin": target_bin
     }

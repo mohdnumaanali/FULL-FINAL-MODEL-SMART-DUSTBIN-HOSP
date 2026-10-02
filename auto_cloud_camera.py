@@ -15,13 +15,11 @@ ret, prev_frame = cap.read()
 prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
 prev_gray = cv2.GaussianBlur(prev_gray, (21, 21), 0)
 
-# Global variables to handle background API threading without freezing the video
-latest_crop = None
 is_predicting = False
 
 prediction_data = {
-    "bin": "SEARCHING...",
-    "item": "Move waste object in view",
+    "bin": "NO MEDICAL WASTE DETECTED",
+    "item": "Waiting for item...",
     "conf": 0.0
 }
 
@@ -31,11 +29,10 @@ BIN_COLORS_BGR = {
     "BLUE": (255, 105, 180),
     "GREEN": (0, 255, 0),
     "BLACK": (128, 128, 128),
-    "GENERAL / UNKNOWN": (200, 200, 200)
+    "NO MEDICAL WASTE DETECTED": (0, 0, 255) # Bright Red for non-medical / unknown
 }
 
 def send_request_async(cropped_img):
-    """Background worker function to send cropped frame to FastAPI server without lagging webcam FPS."""
     global is_predicting, prediction_data
     try:
         _, encoded = cv2.imencode('.jpg', cropped_img)
@@ -46,22 +43,15 @@ def send_request_async(cropped_img):
         )
         if res.status_code == 200:
             data = res.json()
-            conf = data.get("confidence_percentage", 0.0)
-            
-            if conf >= 50.0:
-                prediction_data["bin"] = data.get("target_bin", "UNKNOWN")
-                prediction_data["item"] = data.get("detected_item", "unknown")
-                prediction_data["conf"] = conf
-            else:
-                prediction_data["bin"] = "GENERAL / UNKNOWN"
-                prediction_data["item"] = "Uncertain Object"
-                prediction_data["conf"] = conf
+            prediction_data["bin"] = data.get("target_bin", "NO MEDICAL WASTE DETECTED")
+            prediction_data["item"] = data.get("detected_item", "No valid medical item")
+            prediction_data["conf"] = data.get("confidence_percentage", 0.0)
     except Exception:
         pass
     finally:
         is_predicting = False
 
-print("Continuous Motion Tracking Active! Press 'q' to quit.")
+print("Strict Medical Waste Detector Active!")
 
 while True:
     ret, frame = cap.read()
@@ -71,7 +61,7 @@ while True:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
-    # 1. Real-time Frame Differencing (Motion Detection)
+    # 1. Motion Tracking
     frame_diff = cv2.absdiff(prev_gray, gray)
     thresh = cv2.threshold(frame_diff, 25, 255, cv2.THRESH_BINARY)[1]
     thresh = cv2.dilate(thresh, None, iterations=2)
@@ -82,16 +72,15 @@ while True:
 
     for contour in contours:
         area = cv2.contourArea(contour)
-        if area > 3000:  # Sensitivity threshold for motion tracking
+        if area > 3500:
             if area > max_area:
                 max_area = area
                 largest_contour = contour
 
-    # 2. Continuous Box Tracking & Prediction Dispatch
+    # 2. Process Detected Motion
     if largest_contour is not None:
         x, y, w, h = cv2.boundingRect(largest_contour)
 
-        # Padding around tracked motion region
         pad = 10
         h_img, w_img, _ = frame.shape
         x1, y1 = max(0, x - pad), max(0, y - pad)
@@ -99,33 +88,37 @@ while True:
 
         cropped_obj = frame[y1:y2, x1:x2]
 
-        # Trigger async API prediction whenever the server worker is free
         if cropped_obj.size > 0 and not is_predicting:
             is_predicting = True
             threading.Thread(target=send_request_async, args=(cropped_obj.copy(),), daemon=True).start()
 
-        # 3. Draw Continuous Tracking Box on Screen
+        # Draw box and floating label
         bin_name = prediction_data["bin"]
-        box_color = BIN_COLORS_BGR.get(bin_name, (255, 255, 255))
+        box_color = BIN_COLORS_BGR.get(bin_name, (0, 0, 255))
 
-        # Box following object
         cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 3)
 
-        # Floating Box Label
-        label = f"{bin_name} | {prediction_data['item']} ({prediction_data['conf']}%)"
+        if bin_name == "NO MEDICAL WASTE DETECTED":
+            label = "NO MEDICAL WASTE DETECTED"
+        else:
+            label = f"BIN: {bin_name} | {prediction_data['item']} ({prediction_data['conf']}%)"
+
         (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-        
         cv2.rectangle(frame, (x1, max(0, y1 - 25)), (x1 + label_w + 10, max(20, y1)), box_color, -1)
-        cv2.putText(frame, label, (x1 + 5, max(15, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+        cv2.putText(frame, label, (x1 + 5, max(15, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    else:
+        # Reset display when no motion occurs
+        prediction_data["bin"] = "NO MEDICAL WASTE DETECTED"
+        prediction_data["item"] = "Waiting for item..."
 
     prev_gray = gray.copy()
 
-    # Fixed Top HUD
+    # Top Status HUD
     cv2.rectangle(frame, (10, 10), (630, 45), (0, 0, 0), -1)
-    status = f"TRACKING BIN: [{prediction_data['bin']}] | ITEM: {prediction_data['item']}"
+    status = f"STATUS: {prediction_data['bin']}"
     cv2.putText(frame, status, (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
-    cv2.imshow("Continuous Motion Tracking - Smart Waste Classifier", frame)
+    cv2.imshow("Medical Waste Filtered Detector", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
